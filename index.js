@@ -35,7 +35,7 @@ app.post('/api/sunat/emitir', async (req, res) => {
     const correlativo = sale.ticketNumber || Math.floor(Math.random() * 1000000);
     
     // El XML real es mucho más extenso (Invoice, cac:AccountingSupplierParty, etc.)
-    let xmlString = \`<?xml version="1.0" encoding="ISO-8859-1" standalone="no"?>
+    let xmlString = `<?xml version="1.0" encoding="ISO-8859-1" standalone="no"?>
     <Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2" xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2" xmlns:ccts="urn:un:unece:uncefact:documentation:2" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" xmlns:ext="urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2" xmlns:qdt="urn:oasis:names:specification:ubl:schema:xsd:QualifiedDatatypes-2" xmlns:sac="urn:sunat:names:specification:ubl:peru:schema:xsd:SunatAggregateComponents-1" xmlns:udt="urn:un:unece:uncefact:data:specification:UnqualifiedDataTypesSchemaModule:2">
       <ext:UBLExtensions>
         <ext:UBLExtension>
@@ -44,20 +44,20 @@ app.post('/api/sunat/emitir', async (req, res) => {
       </ext:UBLExtensions>
       <cbc:UBLVersionID>2.1</cbc:UBLVersionID>
       <cbc:CustomizationID>2.0</cbc:CustomizationID>
-      <cbc:ID>\${serie}-\${correlativo}</cbc:ID>
-      <cbc:IssueDate>\${new Date().toISOString().split('T')[0]}</cbc:IssueDate>
-      <cbc:InvoiceTypeCode listID="0101">\${tipoDoc}</cbc:InvoiceTypeCode>
+      <cbc:ID>${serie}-${correlativo}</cbc:ID>
+      <cbc:IssueDate>${new Date().toISOString().split('T')[0]}</cbc:IssueDate>
+      <cbc:InvoiceTypeCode listID="0101">${tipoDoc}</cbc:InvoiceTypeCode>
       <cbc:DocumentCurrencyCode>PEN</cbc:DocumentCurrencyCode>
-      <cbc:LineCountNumeric>\${sale.items?.length || 1}</cbc:LineCountNumeric>
+      <cbc:LineCountNumeric>${sale.items?.length || 1}</cbc:LineCountNumeric>
       <!-- Aquí irían los datos del emisor (Dechy), el cliente y los items -->
-    </Invoice>\`;
+    </Invoice>`;
 
     // 3. Firma del XML con xml-crypto usando el CDT (.pfx a .pem)
     // En un caso real se usa el certificado cargado.
     console.log("Firma digital del comprobante...");
     
     // 4. Envío por SOAP a SUNAT
-    // const soapEnv = \`<soapenv:Envelope ...\`
+    // const soapEnv = `<soapenv:Envelope ...`
     // const sunatRes = await axios.post('https://e-beta.sunat.gob.pe/ol-ti-itcpfegem-beta/billService', soapEnv, { headers });
     
     // 5. Lectura de la respuesta (CDR - Constancia de Recepción)
@@ -69,7 +69,7 @@ app.post('/api/sunat/emitir', async (req, res) => {
       message: 'Comprobante emitido correctamente', 
       data: {
         cdr: 'Aceptado por SUNAT (MOCK)',
-        pdfUrl: \`https://dechy-inventario-backend.vercel.app/pdf/\${serie}-\${correlativo}.pdf\`
+        pdfUrl: `https://dechy-inventario-backend.vercel.app/pdf/${serie}-${correlativo}.pdf`
       } 
     });
   } catch (error) {
