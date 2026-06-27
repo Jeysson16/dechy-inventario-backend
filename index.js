@@ -8,6 +8,10 @@ const port = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
+app.get('/', (req, res) => {
+  res.send('Dechy Inventario Backend API is running. Para emitir comprobantes use /api/sunat/emitir.');
+});
+
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', service: 'dechy-inventario-backend' });
 });
