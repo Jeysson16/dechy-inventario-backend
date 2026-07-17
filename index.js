@@ -1,83 +1,69 @@
-const express = require('express');
-const cors = require('cors');
-require('dotenv').config();
+const express = require("express");
+const cors = require("cors");
+require("dotenv").config();
+
+const { buildSunatDraft, SunatValidationError } = require("./sunat");
 
 const app = express();
 const port = process.env.PORT || 3001;
+const allowedOrigins = (process.env.ALLOWED_ORIGINS ||
+  "https://dechy-inventario.web.app,https://dechy-inventario.firebaseapp.com,http://localhost:5173")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
-app.use(cors());
-app.use(express.json());
+app.use(cors({ origin: allowedOrigins }));
+app.use(express.json({ limit: "1mb" }));
 
-app.get('/', (req, res) => {
-  res.send('Dechy Inventario Backend API is running. Para emitir comprobantes use /api/sunat/emitir.');
+app.get("/", (_req, res) => {
+  res.json({
+    service: "dechy-inventario-backend",
+    status: "ok",
+    sunatMode: "dry-run",
+    message: "La transmisión a SUNAT está deshabilitada. Use POST /api/sunat/preview.",
+  });
 });
 
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', service: 'dechy-inventario-backend' });
+app.get("/api/health", (_req, res) => {
+  res.json({
+    status: "ok",
+    service: "dechy-inventario-backend",
+    sunatMode: "dry-run",
+    outboundSunatEnabled: false,
+  });
 });
 
-// Endpoint to receive billing request and send to SUNAT
-app.post('/api/sunat/emitir', async (req, res) => {
+function preview(req, res) {
   try {
-    const { sale, documentType, customerDocument, amountPaid, paymentMethod } = req.body;
-    
-    // 1. Aquí se extrae la configuración de SUNAT (RUC, Usuario SOL, Clave SOL)
-    // En un entorno real se obtendría de la BD (Firestore) o variables de entorno.
-    const ruc = process.env.SUNAT_RUC;
-    const userSol = process.env.SUNAT_USER_SOL;
-    const passSol = process.env.SUNAT_PASS_SOL;
-
-    // 2. Construcción del XML (UBL 2.1)
-    // Este es un esquema simplificado. Se requiere mapear todos los items de la venta.
-    const isFactura = documentType === 'Factura';
-    const tipoDoc = isFactura ? '01' : '03'; // 01: Factura, 03: Boleta
-    const serie = isFactura ? 'F001' : 'B001';
-    const correlativo = sale.ticketNumber || Math.floor(Math.random() * 1000000);
-    
-    // El XML real es mucho más extenso (Invoice, cac:AccountingSupplierParty, etc.)
-    let xmlString = `<?xml version="1.0" encoding="ISO-8859-1" standalone="no"?>
-    <Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2" xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2" xmlns:ccts="urn:un:unece:uncefact:documentation:2" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" xmlns:ext="urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2" xmlns:qdt="urn:oasis:names:specification:ubl:schema:xsd:QualifiedDatatypes-2" xmlns:sac="urn:sunat:names:specification:ubl:peru:schema:xsd:SunatAggregateComponents-1" xmlns:udt="urn:un:unece:uncefact:data:specification:UnqualifiedDataTypesSchemaModule:2">
-      <ext:UBLExtensions>
-        <ext:UBLExtension>
-          <ext:ExtensionContent></ext:ExtensionContent>
-        </ext:UBLExtension>
-      </ext:UBLExtensions>
-      <cbc:UBLVersionID>2.1</cbc:UBLVersionID>
-      <cbc:CustomizationID>2.0</cbc:CustomizationID>
-      <cbc:ID>${serie}-${correlativo}</cbc:ID>
-      <cbc:IssueDate>${new Date().toISOString().split('T')[0]}</cbc:IssueDate>
-      <cbc:InvoiceTypeCode listID="0101">${tipoDoc}</cbc:InvoiceTypeCode>
-      <cbc:DocumentCurrencyCode>PEN</cbc:DocumentCurrencyCode>
-      <cbc:LineCountNumeric>${sale.items?.length || 1}</cbc:LineCountNumeric>
-      <!-- Aquí irían los datos del emisor (Dechy), el cliente y los items -->
-    </Invoice>`;
-
-    // 3. Firma del XML con xml-crypto usando el CDT (.pfx a .pem)
-    // En un caso real se usa el certificado cargado.
-    console.log("Firma digital del comprobante...");
-    
-    // 4. Envío por SOAP a SUNAT
-    // const soapEnv = `<soapenv:Envelope ...`
-    // const sunatRes = await axios.post('https://e-beta.sunat.gob.pe/ol-ti-itcpfegem-beta/billService', soapEnv, { headers });
-    
-    // 5. Lectura de la respuesta (CDR - Constancia de Recepción)
-    console.log("Enviando comprobante a SUNAT...");
-
-    // Mock response for now
-    res.json({ 
-      success: true, 
-      message: 'Comprobante emitido correctamente', 
-      data: {
-        cdr: 'Aceptado por SUNAT (MOCK)',
-        pdfUrl: `https://dechy-inventario-backend.vercel.app/pdf/${serie}-${correlativo}.pdf`
-      } 
-    });
+    const draft = buildSunatDraft(req.body);
+    res.json({ success: true, data: draft });
   } catch (error) {
-    console.error('Error emitting to SUNAT:', error);
-    res.status(500).json({ success: false, error: error.message });
+    if (error instanceof SunatValidationError) {
+      return res.status(422).json({
+        success: false,
+        code: "SUNAT_VALIDATION_ERROR",
+        errors: error.errors,
+      });
+    }
+    console.error("Error building SUNAT draft:", error);
+    return res.status(500).json({ success: false, code: "INTERNAL_ERROR" });
   }
+}
+
+app.post("/api/sunat/preview", preview);
+
+// Compatibilidad temporal con el endpoint antiguo. Solo permite previsualizar.
+app.post("/api/sunat/emitir", (req, res) => {
+  if (req.body?.dryRun === true) return preview(req, res);
+  return res.status(409).json({
+    success: false,
+    code: "SUNAT_SEND_DISABLED",
+    message: "Envío bloqueado. Use dryRun=true o POST /api/sunat/preview.",
+  });
 });
 
-app.listen(port, () => {
-  console.log(`Backend server running on port ${port}`);
-});
+if (require.main === module) {
+  app.listen(port, () => console.log(`Backend server running on port ${port}`));
+}
+
+module.exports = app;
