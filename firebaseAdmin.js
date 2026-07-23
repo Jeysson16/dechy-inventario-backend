@@ -4,6 +4,15 @@ const { getFirestore } = require("firebase-admin/firestore");
 
 let services;
 
+function isTokenVerificationError(error) {
+  return [
+    "auth/argument-error",
+    "auth/id-token-expired",
+    "auth/id-token-revoked",
+    "auth/invalid-id-token",
+  ].includes(error?.code);
+}
+
 function firebaseOptions() {
   const projectId = process.env.FIREBASE_PROJECT_ID || process.env.GCLOUD_PROJECT;
   const rawServiceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
@@ -13,6 +22,9 @@ function firebaseOptions() {
       serviceAccount = JSON.parse(rawServiceAccount);
     } catch {
       throw new Error("FIREBASE_SERVICE_ACCOUNT_JSON no contiene JSON válido.");
+    }
+    if (projectId && serviceAccount.project_id && projectId !== serviceAccount.project_id) {
+      throw new Error("FIREBASE_PROJECT_ID no coincide con project_id de FIREBASE_SERVICE_ACCOUNT_JSON.");
     }
     return { credential: cert(serviceAccount), projectId: projectId || serviceAccount.project_id };
   }
@@ -49,6 +61,13 @@ async function authenticateFirebase(req, res, next) {
     return next();
   } catch (error) {
     console.error("Firebase authentication failed:", error?.code || error?.message);
+    if (!isTokenVerificationError(error)) {
+      return res.status(503).json({
+        success: false,
+        code: "FIREBASE_ADMIN_UNAVAILABLE",
+        message: "El backend no pudo validar Firebase. Revise FIREBASE_PROJECT_ID y FIREBASE_SERVICE_ACCOUNT_JSON en Vercel.",
+      });
+    }
     return res.status(401).json({ success: false, code: "INVALID_FIREBASE_TOKEN", message: "La sesión de Firebase no es válida." });
   }
 }
@@ -63,4 +82,4 @@ function requireRoles(...allowedRoles) {
   };
 }
 
-module.exports = { authenticateFirebase, getFirebaseServices, requireRoles };
+module.exports = { authenticateFirebase, getFirebaseServices, isTokenVerificationError, requireRoles };
