@@ -3,6 +3,7 @@ const cors = require("cors");
 require("dotenv").config();
 
 const { buildSunatDraft, SunatValidationError } = require("./sunat");
+const { DocumentLookupError, lookupPeruvianDocument } = require("./documentLookupService");
 const { authenticateFirebase, requireRoles } = require("./firebaseAdmin");
 const {
   FiscalServiceError,
@@ -63,6 +64,14 @@ function preview(req, res) {
 app.post("/api/sunat/preview", preview);
 
 function fiscalError(error, res) {
+  if (error instanceof DocumentLookupError) {
+    return res.status(error.status || 422).json({
+      success: false,
+      code: error.code,
+      message: error.message,
+      ...(error.details ? { details: error.details } : {}),
+    });
+  }
   if (error instanceof FiscalServiceError || error instanceof SunatTransportError) {
     return res.status(error.status || 422).json({
       success: false,
@@ -78,6 +87,18 @@ function fiscalError(error, res) {
     message: "El backend no pudo acceder de forma segura a Firebase o SUNAT.",
   });
 }
+
+app.get(
+  "/api/documents/:number",
+  authenticateFirebase,
+  async (req, res) => {
+    try {
+      return res.json({ success: true, data: await lookupPeruvianDocument(req.params.number) });
+    } catch (error) {
+      return fiscalError(error, res);
+    }
+  },
+);
 
 app.get(
   "/api/sunat/config/status",
