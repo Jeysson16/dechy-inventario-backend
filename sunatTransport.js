@@ -130,7 +130,26 @@ async function sendBill({ xml, ruc, documentType, documentId, environment, crede
     },
   );
   if (response.status < 200 || response.status >= 300) {
-    throw new SunatTransportError(`SUNAT respondió HTTP ${response.status}.`, { code: "SUNAT_HTTP_ERROR" });
+    // SUNAT sends many useful validation errors as SOAP Faults with an HTTP
+    // 400 response. Read the fault before classifying it as a generic HTTP
+    // failure, while keeping credentials and XML out of logs and responses.
+    const responseBody = String(response.data || "");
+    const faultCode = matchXml(responseBody, "faultcode");
+    const faultMessage = faultCode
+      ? decodeEntities(matchXml(responseBody, "faultstring") || "SUNAT rechazó la solicitud SOAP.")
+      : null;
+    console.error("SUNAT HTTP error", {
+      status: response.status,
+      faultCode,
+      faultMessage,
+    });
+    throw new SunatTransportError(
+      faultMessage || `SUNAT respondió HTTP ${response.status} sin un detalle SOAP.`,
+      {
+        code: faultCode || "SUNAT_HTTP_ERROR",
+        details: { httpStatus: response.status, ...(faultCode ? { faultCode } : {}) },
+      },
+    );
   }
   return { ...parseCdrSoap(response.data), signedXml, endpoint: ENDPOINTS[environment] };
 }
