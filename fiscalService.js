@@ -365,5 +365,5 @@ async function refreshSaleSunatStatus(saleId) {
 
 module.exports = {
   FiscalServiceError, getConfigurationStatus, previewSale, readConfiguration,
-  refreshSaleSunatStatus, saveConfiguration, sendSaleToSunat, validateConfigurationReadiness,
+  refreshSaleSunatStatus, saveConfiguration, sendSaleToSunat,
 };
