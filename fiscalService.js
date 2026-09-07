@@ -250,12 +250,32 @@ async function sendSaleToSunat(saleId, environment, actor) {
     await batch.commit();
     return { ...audit, createdAt: undefined, cdrFileName: result.cdrFileName, accepted, status };
   } catch (error) {
+    // SUNAT 0140 means it already received this document and is still
+    // processing it. Keep it locked instead of presenting it as a failed
+    // transmission that operators may retry repeatedly.
+    const isSunatProcessing = error?.code === "soap-env:Server.0140";
     await saleRef.set({ sunat: {
       ...(reservation.sale.sunat || {}), documentType: reservation.documentType,
-      documentId: reservation.documentId, environment: targetEnvironment, status: "send_error",
-      sentToSunat: false, errorCode: error.code || "SUNAT_SEND_ERROR", errorMessage: error.message,
-      failedAt: FieldValue.serverTimestamp(),
+      documentId: reservation.documentId, environment: targetEnvironment,
+      status: isSunatProcessing ? "processing" : "send_error",
+      sentToSunat: isSunatProcessing,
+      ...(isSunatProcessing ? { description: error.message, sunatProcessingAt: FieldValue.serverTimestamp() } : {}),
+      ...(!isSunatProcessing ? {
+        errorCode: error.code || "SUNAT_SEND_ERROR",
+        errorMessage: error.message,
+        failedAt: FieldValue.serverTimestamp(),
+      } : {}),
     } }, { merge: true });
+    if (isSunatProcessing) {
+      return {
+        saleId,
+        documentId: reservation.documentId,
+        status: "processing",
+        processing: true,
+        accepted: false,
+        description: error.message,
+      };
+    }
     throw error;
   }
 }
