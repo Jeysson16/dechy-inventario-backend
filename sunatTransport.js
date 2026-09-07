@@ -188,7 +188,7 @@ async function getStatusCdr({ ruc, documentType, documentId, credentials, timeou
     CDR_STATUS_ENDPOINT,
     statusCdrEnvelope(`${ruc}${credentials.usuarioSol}`, credentials.claveSol, { ruc, documentType, series, number }),
     {
-      headers: { "Content-Type": "text/xml; charset=utf-8", SOAPAction: "getStatusCdr" },
+      headers: { "Content-Type": "text/xml; charset=utf-8", SOAPAction: "urn:getStatusCdr" },
       timeout: timeoutMs,
       responseType: "text",
       transformResponse: [(value) => value],
