@@ -181,7 +181,7 @@ async function previewSale(saleId) {
   return buildSunatDraft(draftInput(sale, publicConfig, existingNumber));
 }
 
-async function reserveFiscalDocument(db, saleId, publicConfig, actor) {
+async function reserveFiscalDocument(db, saleId, publicConfig, actor, environment) {
   const saleRef = db.collection("sales").doc(saleId);
   return db.runTransaction(async (transaction) => {
     const saleSnapshot = await transaction.get(saleRef);
@@ -193,6 +193,15 @@ async function reserveFiscalDocument(db, saleId, publicConfig, actor) {
     if (["processing", "pending_cdr"].includes(currentStatus)) throw new FiscalServiceError("La venta ya tiene un envío SUNAT en proceso.", { code: "SUNAT_SEND_IN_PROGRESS", status: 409 });
     if (["accepted", "accepted_with_observations"].includes(currentStatus)) {
       throw new FiscalServiceError("La venta ya fue aceptada por SUNAT.", { code: "ALREADY_ACCEPTED", status: 409 });
+    }
+    const cdrNotFound = sale.sunat?.errorCode === "SUNAT_CDR_NOT_FOUND" ||
+      /ticket no existe|SUNAT no encontró un CDR/i.test(sale.sunat?.description || "");
+    const previousRetryCount = Number(sale.sunat?.retryAttemptCount || 0);
+    if (cdrNotFound && previousRetryCount >= 1) {
+      throw new FiscalServiceError("El único reintento autorizado para este correlativo ya fue consumido.", {
+        code: "SUNAT_RETRY_LIMIT_REACHED",
+        status: 409,
+      });
     }
     const series = documentType === "01" ? publicConfig.facturaSeries : publicConfig.boletaSeries;
     let number = String(sale.sunat?.documentId || "").split("-")[1] || null;
@@ -206,10 +215,23 @@ async function reserveFiscalDocument(db, saleId, publicConfig, actor) {
     transaction.set(saleRef, {
       sunat: {
         ...(sale.sunat || {}), documentType, documentId, status: "processing", sentToSunat: false,
-        environment: "beta", lastAttemptAt: FieldValue.serverTimestamp(), lastAttemptBy: actor.uid,
+        environment, lastAttemptAt: FieldValue.serverTimestamp(), lastAttemptBy: actor.uid,
+        ...(cdrNotFound ? {
+          retryAttemptCount: previousRetryCount + 1,
+          retryAuthorizedAt: FieldValue.serverTimestamp(),
+          retryAllowed: false,
+        } : {}),
       },
     }, { merge: true });
-    return { sale, documentType, series, number, documentId };
+    return {
+      sale,
+      documentType,
+      series,
+      number,
+      documentId,
+      retryAttemptCount: cdrNotFound ? previousRetryCount + 1 : previousRetryCount,
+      controlledRetry: cdrNotFound,
+    };
   });
 }
 
@@ -223,7 +245,7 @@ async function sendSaleToSunat(saleId, environment, actor) {
   const targetEnvironment = environment === "production" ? "production" : "beta";
   const { db, publicConfig, credentials } = await loadSaleAndConfig(saleId);
   if (!credentials?.pfxBase64) throw new FiscalServiceError("Certificado PFX no configurado en el backend.", { code: "PFX_REQUIRED" });
-  const reservation = await reserveFiscalDocument(db, saleId, publicConfig, actor);
+  const reservation = await reserveFiscalDocument(db, saleId, publicConfig, actor, targetEnvironment);
   const draft = buildSunatDraft(draftInput(reservation.sale, publicConfig, reservation.number));
   const saleRef = db.collection("sales").doc(saleId);
   try {
@@ -240,11 +262,16 @@ async function sendSaleToSunat(saleId, environment, actor) {
       description: result.description, notes: result.notes, createdAt: FieldValue.serverTimestamp(), actorUid: actor.uid,
     };
     const batch = db.batch();
+    const retryMetadata = reservation.controlledRetry ? {
+      retryAttemptCount: reservation.retryAttemptCount,
+      retryAllowed: false,
+    } : {};
     batch.set(saleRef, { sunat: {
       ...(reservation.sale.sunat || {}), documentType: reservation.documentType,
       documentId: reservation.documentId, environment: targetEnvironment, status,
       sentToSunat: true, responseCode: result.responseCode, description: result.description,
       notes: result.notes, cdrFileName: result.cdrFileName, respondedAt: FieldValue.serverTimestamp(),
+      ...retryMetadata,
     } }, { merge: true });
     batch.set(db.collection("sunatOutbox").doc(`${saleId}_${reservation.documentId}`), audit);
     await batch.commit();
@@ -260,6 +287,10 @@ async function sendSaleToSunat(saleId, environment, actor) {
       status: isSunatProcessing ? "processing" : "send_error",
       sentToSunat: isSunatProcessing,
       ...(isSunatProcessing ? { description: error.message, sunatProcessingAt: FieldValue.serverTimestamp() } : {}),
+      ...(reservation.controlledRetry ? {
+        retryAttemptCount: reservation.retryAttemptCount,
+        retryAllowed: false,
+      } : {}),
       ...(!isSunatProcessing ? {
         errorCode: error.code || "SUNAT_SEND_ERROR",
         errorMessage: error.message,
@@ -308,15 +339,33 @@ async function refreshSaleSunatStatus(saleId) {
   });
   const saleRef = db.collection("sales").doc(saleId);
   if (!result.available) {
+    // 0127 means SUNAT has no process/CDR for this document. Once its waiting
+    // window has passed, the safe recovery is one retry with the same fiscal
+    // correlativo; never create a new one.
+    const cdrNotFound = ["0127", "127"].includes(String(result.statusCode || "")) ||
+      /ticket no existe/i.test(result.statusMessage || "");
     await saleRef.set({ sunat: {
       ...(sale.sunat || {}),
-      status: "processing",
-      sentToSunat: true,
-      description: result.statusMessage,
+      status: cdrNotFound ? "send_error" : "processing",
+      sentToSunat: !cdrNotFound,
+      description: cdrNotFound
+        ? "SUNAT no encontró un CDR para este correlativo. Puede reenviar una sola vez el mismo comprobante fiscal."
+        : result.statusMessage,
       lastStatusCheckAt: FieldValue.serverTimestamp(),
       lastStatusCheckCode: result.statusCode,
+      ...(cdrNotFound ? { errorCode: "SUNAT_CDR_NOT_FOUND", errorMessage: result.statusMessage } : {}),
     } }, { merge: true });
-    return { saleId, documentId, status: "processing", processing: true, completed: false, description: result.statusMessage };
+    return {
+      saleId,
+      documentId,
+      status: cdrNotFound ? "send_error" : "processing",
+      processing: !cdrNotFound,
+      retryAllowed: cdrNotFound,
+      completed: false,
+      description: cdrNotFound
+        ? "SUNAT no encontró un CDR para este correlativo. Puede reenviar una sola vez el mismo comprobante fiscal."
+        : result.statusMessage,
+    };
   }
 
   const accepted = result.responseCode === "0";
