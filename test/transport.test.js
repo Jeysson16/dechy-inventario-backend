@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const forge = require("node-forge");
 const AdmZip = require("adm-zip");
 const { buildSunatDraft } = require("../sunat");
-const { parseCdrSoap, signUbl } = require("../sunatTransport");
+const { parseCdrSoap, parseCdrStatusSoap, signUbl } = require("../sunatTransport");
 
 function testPfx() {
   const keys = forge.pki.rsa.generateKeyPair(1024);
@@ -42,4 +42,15 @@ test("extrae código, descripción y observaciones del CDR", () => {
   assert.equal(result.responseCode, "0");
   assert.equal(result.description, "Aceptado");
   assert.deepEqual(result.notes, ["Observación de prueba"]);
+});
+
+test("extrae el CDR recuperado desde la consulta de estado", () => {
+  const cdrXml = `<?xml version="1.0"?><ApplicationResponse><ResponseCode>0</ResponseCode><Description>Aceptado</Description></ApplicationResponse>`;
+  const zip = new AdmZip();
+  zip.addFile("R-20100070970-01-F001-1.xml", Buffer.from(cdrXml));
+  const soap = `<Envelope><Body><statusCdr><statusCode>0004</statusCode><statusMessage>La constancia existe</statusMessage><content>${zip.toBuffer().toString("base64")}</content></statusCdr></Body></Envelope>`;
+  const result = parseCdrStatusSoap(soap);
+  assert.equal(result.available, true);
+  assert.equal(result.statusCode, "0004");
+  assert.equal(result.responseCode, "0");
 });

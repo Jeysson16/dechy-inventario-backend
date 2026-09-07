@@ -9,8 +9,10 @@ const {
   FiscalServiceError,
   getConfigurationStatus,
   previewSale,
+  refreshSaleSunatStatus,
   saveConfiguration,
   sendSaleToSunat,
+  validateConfigurationReadiness,
 } = require("./fiscalService");
 const { SunatTransportError } = require("./sunatTransport");
 
@@ -152,6 +154,19 @@ app.post(
         req.firebaseUser,
       );
       return res.json({ success: true, data });
+    } catch (error) {
+      return fiscalError(error, res);
+    }
+  },
+);
+
+app.post(
+  "/api/sunat/sales/:saleId/status",
+  authenticateFirebase,
+  requireRoles("admin", "manager"),
+  async (req, res) => {
+    try {
+      return res.json({ success: true, data: await refreshSaleSunatStatus(req.params.saleId) });
     } catch (error) {
       return fiscalError(error, res);
     }

@@ -2,7 +2,7 @@ const { FieldValue } = require("firebase-admin/firestore");
 const { getFirebaseServices } = require("./firebaseAdmin");
 const { decryptSecret, encryptSecret, encryptionReady } = require("./secretConfig");
 const { buildSunatDraft, validRuc } = require("./sunat");
-const { sendBill } = require("./sunatTransport");
+const { getStatusCdr, sendBill, signUbl } = require("./sunatTransport");
 
 class FiscalServiceError extends Error {
   constructor(message, { code = "FISCAL_SERVICE_ERROR", status = 400, details = null } = {}) {
@@ -280,7 +280,90 @@ async function sendSaleToSunat(saleId, environment, actor) {
   }
 }
 
+async function refreshSaleSunatStatus(saleId) {
+  const { db, sale, publicConfig, credentials } = await loadSaleAndConfig(saleId);
+  const documentType = saleDocumentType(sale);
+  const documentId = sale.sunat?.documentId;
+  if (!documentId) {
+    throw new FiscalServiceError("La venta no tiene correlativo fiscal reservado.", { code: "FISCAL_DOCUMENT_NOT_RESERVED", status: 409 });
+  }
+  if (!["processing", "pending_cdr"].includes(sale.sunat?.status)) {
+    return {
+      saleId,
+      documentId,
+      status: sale.sunat?.status || "not_sent",
+      completed: ["accepted", "accepted_with_observations", "rejected"].includes(sale.sunat?.status),
+      description: sale.sunat?.description || "El comprobante no tiene una consulta SUNAT pendiente.",
+    };
+  }
+  if (!credentials?.usuarioSol || !credentials?.claveSol) {
+    throw new FiscalServiceError("Usuario y Clave SOL no configurados para consultar el estado.", { code: "SOL_REQUIRED" });
+  }
+
+  const result = await getStatusCdr({
+    ruc: publicConfig.ruc,
+    documentType,
+    documentId,
+    credentials,
+  });
+  const saleRef = db.collection("sales").doc(saleId);
+  if (!result.available) {
+    await saleRef.set({ sunat: {
+      ...(sale.sunat || {}),
+      status: "processing",
+      sentToSunat: true,
+      description: result.statusMessage,
+      lastStatusCheckAt: FieldValue.serverTimestamp(),
+      lastStatusCheckCode: result.statusCode,
+    } }, { merge: true });
+    return { saleId, documentId, status: "processing", processing: true, completed: false, description: result.statusMessage };
+  }
+
+  const accepted = result.responseCode === "0";
+  const status = accepted ? (result.notes.length ? "accepted_with_observations" : "accepted") : "rejected";
+  const batch = db.batch();
+  batch.set(saleRef, { sunat: {
+    ...(sale.sunat || {}),
+    documentType,
+    documentId,
+    environment: "production",
+    status,
+    sentToSunat: true,
+    responseCode: result.responseCode,
+    description: result.description,
+    notes: result.notes,
+    cdrFileName: result.cdrFileName,
+    respondedAt: FieldValue.serverTimestamp(),
+    lastStatusCheckAt: FieldValue.serverTimestamp(),
+  } }, { merge: true });
+  batch.set(db.collection("sunatOutbox").doc(`${saleId}_${documentId}`), {
+    saleId,
+    documentId,
+    documentType,
+    environment: "production",
+    cdrXml: result.cdrXml,
+    responseCode: result.responseCode,
+    description: result.description,
+    notes: result.notes,
+    cdrFileName: result.cdrFileName,
+    cdrRetrievedAt: FieldValue.serverTimestamp(),
+    endpoint: result.endpoint,
+  }, { merge: true });
+  await batch.commit();
+  return {
+    saleId,
+    documentId,
+    status,
+    accepted,
+    completed: true,
+    responseCode: result.responseCode,
+    description: result.description,
+    notes: result.notes,
+    cdrXml: result.cdrXml,
+  };
+}
+
 module.exports = {
   FiscalServiceError, getConfigurationStatus, previewSale, readConfiguration,
-  saveConfiguration, sendSaleToSunat,
+  refreshSaleSunatStatus, saveConfiguration, sendSaleToSunat, validateConfigurationReadiness,
 };

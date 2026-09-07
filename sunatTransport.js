@@ -7,6 +7,7 @@ const ENDPOINTS = {
   beta: "https://e-beta.sunat.gob.pe/ol-ti-itcpfegem-beta/billService",
   production: "https://e-factura.sunat.gob.pe/ol-ti-itcpfegem/billService",
 };
+const CDR_STATUS_ENDPOINT = "https://e-factura.sunat.gob.pe/ol-it-wsconscpegem/billConsultService";
 
 class SunatTransportError extends Error {
   constructor(message, { code = "SUNAT_TRANSPORT_ERROR", details = null } = {}) {
@@ -81,6 +82,10 @@ function soapEnvelope(username, password, fileName, zipBase64) {
   return `<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ser="http://service.sunat.gob.pe" xmlns:wsse="http://schemas.xmlsoap.org/ws/2002/12/secext"><soapenv:Header><wsse:Security><wsse:UsernameToken><wsse:Username>${xmlEscape(username)}</wsse:Username><wsse:Password>${xmlEscape(password)}</wsse:Password></wsse:UsernameToken></wsse:Security></soapenv:Header><soapenv:Body><ser:sendBill><fileName>${xmlEscape(fileName)}</fileName><contentFile>${zipBase64}</contentFile></ser:sendBill></soapenv:Body></soapenv:Envelope>`;
 }
 
+function statusCdrEnvelope(username, password, { ruc, documentType, series, number }) {
+  return `<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ser="http://service.sunat.gob.pe" xmlns:wsse="http://schemas.xmlsoap.org/ws/2002/12/secext"><soapenv:Header><wsse:Security><wsse:UsernameToken><wsse:Username>${xmlEscape(username)}</wsse:Username><wsse:Password>${xmlEscape(password)}</wsse:Password></wsse:UsernameToken></wsse:Security></soapenv:Header><soapenv:Body><ser:getStatusCdr><rucComprobante>${xmlEscape(ruc)}</rucComprobante><tipoComprobante>${xmlEscape(documentType)}</tipoComprobante><serieComprobante>${xmlEscape(series)}</serieComprobante><numeroComprobante>${xmlEscape(number)}</numeroComprobante></ser:getStatusCdr></soapenv:Body></soapenv:Envelope>`;
+}
+
 function matchXml(xml, localName) {
   const match = String(xml).match(new RegExp(`<(?:(?:\\w+):)?${localName}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/(?:(?:\\w+):)?${localName}>`, "i"));
   return match?.[1]?.trim() || null;
@@ -90,14 +95,15 @@ function decodeEntities(value = "") {
   return value.replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&quot;", '"').replaceAll("&apos;", "'").replaceAll("&amp;", "&");
 }
 
-function parseCdrSoap(soapXml) {
+function throwSoapFault(soapXml) {
   const faultCode = matchXml(soapXml, "faultcode");
-  if (faultCode) {
-    throw new SunatTransportError(decodeEntities(matchXml(soapXml, "faultstring") || "SUNAT rechazó la solicitud SOAP."), {
-      code: faultCode,
-    });
-  }
-  const encoded = matchXml(soapXml, "applicationResponse");
+  if (!faultCode) return;
+  throw new SunatTransportError(decodeEntities(matchXml(soapXml, "faultstring") || "SUNAT rechazó la solicitud SOAP."), {
+    code: faultCode,
+  });
+}
+
+function parseCdrZip(encoded) {
   if (!encoded) throw new SunatTransportError("SUNAT no devolvió un CDR.", { code: "CDR_MISSING" });
   const cdrZip = new AdmZip(Buffer.from(encoded, "base64"));
   const entry = cdrZip.getEntries().find((item) => !item.isDirectory && item.entryName.toLowerCase().endsWith(".xml"));
@@ -108,6 +114,20 @@ function parseCdrSoap(soapXml) {
   const notes = [...cdrXml.matchAll(/<(?:(?:\w+):)?Note(?:\s[^>]*)?>([\s\S]*?)<\/(?:(?:\w+):)?Note>/gi)]
     .map((match) => decodeEntities(match[1].trim()));
   return { responseCode, description, notes, cdrFileName: entry.entryName, cdrXml };
+}
+
+function parseCdrSoap(soapXml) {
+  throwSoapFault(soapXml);
+  return parseCdrZip(matchXml(soapXml, "applicationResponse"));
+}
+
+function parseCdrStatusSoap(soapXml) {
+  throwSoapFault(soapXml);
+  const statusCode = decodeEntities(matchXml(soapXml, "statusCode") || "");
+  const statusMessage = decodeEntities(matchXml(soapXml, "statusMessage") || "SUNAT aún no tiene una constancia disponible.");
+  const encoded = matchXml(soapXml, "content");
+  if (!encoded) return { available: false, statusCode, statusMessage };
+  return { available: true, statusCode, statusMessage, ...parseCdrZip(encoded) };
 }
 
 async function sendBill({ xml, ruc, documentType, documentId, environment, credentials, timeoutMs = 30000 }) {
@@ -154,4 +174,41 @@ async function sendBill({ xml, ruc, documentType, documentId, environment, crede
   return { ...parseCdrSoap(response.data), signedXml, endpoint: ENDPOINTS[environment] };
 }
 
-module.exports = { ENDPOINTS, SunatTransportError, parseCdrSoap, readPfx, sendBill, signUbl };
+async function getStatusCdr({ ruc, documentType, documentId, credentials, timeoutMs = 30000 }) {
+  if (!/^(01|07|08)$/.test(String(documentType))) {
+    throw new SunatTransportError("La consulta automática de CDR SUNAT solo está disponible para facturas y sus notas vinculadas.", {
+      code: "CDR_STATUS_UNSUPPORTED_DOCUMENT",
+    });
+  }
+  const [series, number] = String(documentId || "").split("-");
+  if (!series || !/^\d+$/.test(number || "")) {
+    throw new SunatTransportError("El correlativo fiscal no es válido para consultar SUNAT.", { code: "INVALID_FISCAL_DOCUMENT_ID" });
+  }
+  const response = await axios.post(
+    CDR_STATUS_ENDPOINT,
+    statusCdrEnvelope(`${ruc}${credentials.usuarioSol}`, credentials.claveSol, { ruc, documentType, series, number }),
+    {
+      headers: { "Content-Type": "text/xml; charset=utf-8", SOAPAction: "getStatusCdr" },
+      timeout: timeoutMs,
+      responseType: "text",
+      transformResponse: [(value) => value],
+      validateStatus: () => true,
+    },
+  );
+  if (response.status < 200 || response.status >= 300) {
+    const body = String(response.data || "");
+    const faultCode = matchXml(body, "faultcode");
+    throw new SunatTransportError(
+      faultCode
+        ? decodeEntities(matchXml(body, "faultstring") || "SUNAT rechazó la consulta de estado.")
+        : `SUNAT respondió HTTP ${response.status} al consultar el estado.`,
+      { code: faultCode || "SUNAT_STATUS_HTTP_ERROR", details: { httpStatus: response.status } },
+    );
+  }
+  return { ...parseCdrStatusSoap(response.data), endpoint: CDR_STATUS_ENDPOINT };
+}
+
+module.exports = {
+  CDR_STATUS_ENDPOINT, ENDPOINTS, SunatTransportError, getStatusCdr,
+  parseCdrSoap, parseCdrStatusSoap, readPfx, sendBill, signUbl,
+};
