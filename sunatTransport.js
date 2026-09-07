@@ -83,7 +83,7 @@ function soapEnvelope(username, password, fileName, zipBase64) {
 }
 
 function statusCdrEnvelope(username, password, { ruc, documentType, series, number }) {
-  return `<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ser="http://service.sunat.gob.pe" xmlns:wsse="http://schemas.xmlsoap.org/ws/2002/12/secext"><soapenv:Header><wsse:Security><wsse:UsernameToken><wsse:Username>${xmlEscape(username)}</wsse:Username><wsse:Password>${xmlEscape(password)}</wsse:Password></wsse:UsernameToken></wsse:Security></soapenv:Header><soapenv:Body><ser:getStatusCdr><rucComprobante>${xmlEscape(ruc)}</rucComprobante><tipoComprobante>${xmlEscape(documentType)}</tipoComprobante><serieComprobante>${xmlEscape(series)}</serieComprobante><numeroComprobante>${xmlEscape(number)}</numeroComprobante></ser:getStatusCdr></soapenv:Body></soapenv:Envelope>`;
+  return `<?xml version="1.0" encoding="UTF-8"?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ser="http://service.sunat.gob.pe" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"><soapenv:Header><wsse:Security><wsse:UsernameToken><wsse:Username>${xmlEscape(username)}</wsse:Username><wsse:Password>${xmlEscape(password)}</wsse:Password></wsse:UsernameToken></wsse:Security></soapenv:Header><soapenv:Body><ser:getStatusCdr><rucComprobante>${xmlEscape(ruc)}</rucComprobante><tipoComprobante>${xmlEscape(documentType)}</tipoComprobante><serieComprobante>${xmlEscape(series)}</serieComprobante><numeroComprobante>${xmlEscape(number)}</numeroComprobante></ser:getStatusCdr></soapenv:Body></soapenv:Envelope>`;
 }
 
 function matchXml(xml, localName) {
